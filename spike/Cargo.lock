@@ -393,9 +393,9 @@ checksum = "c938015719552d665fd0553b90d96cd7ff58e83e4c061ca99e6bb78865a72752"
 
 [[package]]
 name = "positorium"
-version = "0.3.1-beta.6"
+version = "0.3.2-beta.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a8d1d65e1c2a7f94d3e60dcfa7c458905ab36b3efa7f7d2dd8bb1fa6c5c88fd"
+checksum = "d4c5f78201c69775fc72fcc19a8c57240200f01a45ef5e1deee4dd7806b569b6"
 dependencies = [
  "bigdecimal",
  "bimap",

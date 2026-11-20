@@ -4,7 +4,7 @@ A Rust proxy that keeps a session's governing constraints alive when the
 answering model changes, using Positorium as its only durable store.
 
 > Status: design plan. The Phase 1 spike is done. The Traqula in §8.3 and §11
-> is validated against `positorium = "=0.3.1-beta.6"` (18 tests, benchmarks to
+> is validated against `positorium = "=0.3.2-beta.7"` (21 tests, benchmarks to
 > 1M posits). See [spike/FINDINGS.md](spike/FINDINGS.md).
 
 ## 1. Purpose and scope
@@ -51,7 +51,7 @@ recovery ceiling of zero, so the user must repair it.
 | # | Decision | Why |
 | --- | --- | --- |
 | D1 | **Rust only**: proxy, mock workers, evaluation tooling | One toolchain across the air gap. Positorium embeds natively |
-| D2 | **Positorium is the only durable store.** All other state is an in-memory cache, rebuildable from Positorium or from the next request. No Redis, Postgres or SQLite | The data is evidence: sourced, timed, revisable and sometimes contradictory. The earlier "hybrid" advice assumed beta.3's serial execution. 0.3.1-beta.6 has concurrent snapshot reads and a single writer, and Positorium stays off the hot path anyway (§8.4) |
+| D2 | **Positorium is the only durable store.** All other state is an in-memory cache, rebuildable from Positorium or from the next request. No Redis, Postgres or SQLite | The data is evidence: sourced, timed, revisable and sometimes contradictory. The earlier "hybrid" advice assumed beta.3's serial execution. Since 0.3.1-beta.6 it has concurrent snapshot reads and a single writer, and Positorium stays off the hot path anyway (§8.4) |
 | D3 | **Router-agnostic downstream.** The contract with the next hop is OpenAI Chat Completions over HTTP + SSE, plus an optional affinity hint | Works with vllm-router, SGLang gateway, LiteLLM, Dynamo, a bare vLLM, or a cloud endpoint (§12) |
 | D4 | **Invisible until needed.** A session that never crosses a boundary is forwarded byte-identically | Zero prompt edits means zero KV-cache impact in the common case |
 | D5 | **Rewrite prompts only at "free moments"**: when the prefix cache is lost anyway (model change, compaction, branch). Within an epoch, re-apply byte-identical edits | Keeps prefixes stable for automatic prefix caching (APC) and cache-aware routing |
@@ -260,17 +260,24 @@ Shared role names are reused across classes, following the cookbook's
 anti-pattern advice. `evidence`, `violations` and similar words are Traqula
 keywords inside constraint bodies, so they are avoided as role names.
 
-Three Traqula facts shape this table (spike S2, S7, S8):
+Four Traqula facts shape this table (spike S2, S3, S7, S8):
 
-- appearances accept only script variables, not `$parameters`;
+- appearances take store-qualified identity parameters, `($b, branch)`, since
+  0.3.2-beta.7. The proxy caches each session's, branch's and positor's
+  identity in Rust and writes with parameters, with no lookups;
 - query variables are lexical, so a lookup cannot correlate with an earlier
-  binding;
-- a lookup must match the stored appearance set exactly.
+  binding. Every mutating script starts with `strict mutations;`, which
+  rejects a write that would fan out over several identities;
+- `{(?e, epoch)}` matches only a unary set; `{(?e, epoch), ...}` also matches
+  supersets;
+- reads and audits are fastest when anchored on a literal key (§8.3).
 
-So **every Thing a later script must reference carries a unique literal key**
-in a class-specific unary role, and writes resolve it with a self-anchored
-keyed get-or-create (rules R1–R4 in the findings). Turns are never lookup
-targets.
+So **every Thing a later script must reference still carries a unique literal
+key** in a class-specific unary role: for anchoring reads and audits, for
+resolving identities after a restart, and for carrying sessions across store
+rotation (identities are remapped; literals are not). Keyed get-or-create is
+needed only the first time a Thing is seen, or after a restart (rules R1–R4 in
+the findings). Turns are never lookup targets.
 
 | Appearance set | Value | Time | Meaning |
 | --- | --- | --- | --- |
@@ -291,7 +298,7 @@ targets.
 | `{(i, cited_turn)}` | `{"turn":12,"quote":"no prod deploys from here"}` | turn time | provenance span. The turn index is a value, not a lookup (R4) |
 | `{(n, replacement), (o, replaced)}` | `"supersedes"` | change time | supersession link |
 | `{(a, complement), (c, complement_of)}` | `"requires"` | introduction | all-or-nothing pairs (paper §6.1) |
-| `{(p, name)}`, `{(p, authority)}` | `"developer:42"`, `"authoritative"` | — | positors (the name is the key). `authority` is resolved in Rust from a cached map, never joined in a query (finding 2) |
+| `{(p, name)}`, `{(p, authority)}` | `"developer:42"`, `"authoritative"` | — | positors (the name is the key). `authority` may be joined in key-anchored reads (2.4 ms at 1M); audits use session ownership instead |
 | `{(e, epoch_key)}` | `"7f3c…#e2"` | epoch start | epoch key (R1) |
 | `{(e, epoch), (b, branch)}` | `"model_change"` | epoch start | handover epoch |
 | `{(e, to_model)}` | `"…"` | epoch start | successor model |
@@ -336,35 +343,43 @@ query policy:
 
 ### 8.3 Traqula (validated)
 
-Record a verified extraction delta (spike R6). `$turn_time` is the developer's
-turn and `@NOW` is extraction time. The lookups are keyed get-or-creates, each
-anchored by its own literal. The item command is one atomic batch. The
-meta-assertion needs a second command, because a posit binding is only
-recallable in a later command. About 30 ms in total (two fsyncs).
+Record a verified extraction delta (spike R6) as **one command and one durable
+commit**, about 15 ms. `$b`, `$dev` and `$ext` are identity parameters cached
+in Rust. `$turn_time` is the developer's turn and `$now` is extraction time.
+Every item of the delta, its developer assertion, the extractor's
+meta-assertion and the watermark go in the same batch. So the watermark moves
+if and only if the items are stored, and a retry after a failure cannot
+duplicate them. `and assert … by` does not take a parameter, so the developer
+assertion is written as its explicit `{posit, ascertains}` posit, which is
+exactly what `and assert` generates.
 
 ```traqula
-search [{(?dev, name)}, $developer, *] or add posit [{(+dev, name)}, $developer, @NOW];
-search [{(?ext, name)}, $extractor, *] or add posit [{(+ext, name)}, $extractor, @NOW];
-search [{(?b, branch_key)}, $branch_key, *] or add posit [{(+b, branch_key)}, $branch_key, @NOW];
-add posit +m [{(+i, item), (b, branch)}, "registered", $turn_time]
-            and assert +a by dev with 100% at $turn_time,
+strict mutations;
+add posit +m [{(+i, item), ($b, branch)}, "registered", $turn_time],
           [{(i, item_key)}, $item_key, $turn_time],
           [{(i, kind)}, "prohibition", $turn_time],
           [{(i, statement)}, $statement, $turn_time],
           [{(i, strength)}, "hard", $turn_time],
           [{(i, enforce)}, $enforce_json, $turn_time],
-          [{(i, cited_turn)}, $cite_json, $turn_time];
-add posit [{(a, posit), (ext, ascertains)}, 85%, @NOW],
-          [{(b, extracted_through)}, $through, @NOW];
+          [{(i, cited_turn)}, $cite_json, $turn_time],
+          +a [{(m, posit), ($dev, ascertains)}, 100%, $turn_time],
+          [{(a, posit), ($ext, ascertains)}, 85%, $now],
+          [{($b, extracted_through)}, $through, $now];
 ```
 
-To assert on an existing item later (revoke, reaffirm, dispute), resolve it
-by `item_key`. Then **re-add its identical membership proposition** to rebind
-`+m`: same branch, value and introduction time. This returns the canonical
+Further items in the same delta repeat the first nine lines with their own
+`+m2`, `+i2` and `+a2` binders.
+
+On first sight of a session, branch or positor, get-or-create it by key
+(`search [{(?b, branch_key)}, $branch_key, *] or add posit …`) and cache the
+returned identity. To assert on an existing item later (revoke, reaffirm,
+dispute), pass its membership posit as `$m`, e.g.
+`add posit [{($m, posit), ($dev, ascertains)}, 0%, $t];`. If only the key is
+known, re-adding the identical membership proposition rebinds the canonical
 posit and creates nothing (S5).
 
-Read a branch's register at cut `$t` (2.7 ms at 1M posits). The anchor is the
-key literal, and authority is resolved in Rust:
+Read a branch's register at cut `$t` (2.4 ms at 1M posits, authority
+included). The anchor is the key literal:
 
 ```traqula
 search [{(?b, branch_key)}, $branch_key, *],
@@ -373,14 +388,17 @@ search [{(?b, branch_key)}, $branch_key, *],
        [{(?i, kind)}, ?kind, *] as of $t,
        [{(?i, strength)}, ?strength, *] as of $t,
        [{(?i, statement)}, ?text, *] as of $t,
-       ?a = [{(?m, posit), (?src, ascertains)}, ?certainty, ?asserted] as of $t
-return ?key, ?kind, ?strength, ?text, ?src, ?certainty, ?asserted;
+       ?a = [{(?m, posit), (?src, ascertains)}, ?certainty, ?asserted] as of $t,
+       [{(?src, authority)}, ?authority, *]
+return ?key, ?kind, ?strength, ?text, ?src, ?authority, ?certainty, ?asserted;
 ```
 
-Two shapes that work but do not scale. Filtering the branch with
-`where ?b = $branch` took 7.7 s at 100k posits. Joining
-`[{(?src, authority)}, ?authority, *]` took 367 ms at 1M. The planner orders
-patterns by structural candidate count and ignores literal selectivity.
+Two shapes that still do not scale in 0.3.2-beta.7 (spike S21). An identity
+parameter in the appearance, `($b, branch)`, joined with the small global
+`authority` class took 244 ms at 1M. `where ?b = $branch` is as fast as the
+key anchor (2.1 ms), but only while it is the sole predicate; one more
+conjunct took it to 270 ms. Reads and audits therefore anchor on the key
+literal.
 
 ### 8.4 Running Positorium inside the proxy
 
@@ -389,26 +407,28 @@ patterns by structural candidate count and ignores literal selectivity.
   `Arc<Database>`.
 - **Writes** go through one dedicated writer thread fed by a channel. The
   crate API is synchronous. Each mutation command is one durable commit:
-  13–15 ms on the M1 Pro dev machine at any store size, with Linux/arm64 yet
-  to be measured. An extraction is 2 commits (about 30 ms), so one writer
-  handles about 30 extractions/s. The expected load is roughly one per
+  14–17 ms on the M1 Pro dev machine at any store size, with Linux/arm64 yet
+  to be measured. An extraction is one command (about 16 ms), so one writer
+  handles about 60 extractions/s. The expected load is roughly one per
   human-facing turn. Add group commit only if Linux fsync is much slower.
+  The writer keeps a map from keys to cached identities (session, branch,
+  positors, items' membership posits) and passes them as identity parameters.
 - **Reads** run in `spawn_blocking` with `ExecutionOptions { timeout,
   query_limits, now }`. Read-only scripts get a consistent snapshot and run
-  concurrently with the writer: 2.9 ms p50 at 1M posits while commits run.
-  Every read is anchored on a key literal (§8.3).
+  concurrently with the writer: about 1 ms p50 at 1M posits while commits
+  run. Every read is anchored on a key literal (§8.3).
 - **Caches** (session chain head, epoch packet bytes, compiled enforcement
-  rules, positor → authority map) are derived. On a cache miss after a
+  rules, key → identity map) are derived. On a cache miss after a
   restart, rebuild from Positorium.
 - **Backups** use `positorium-store backup` against a stopped writer, or a
-  scheduled maintenance window. The crate builds the binary for linux/arm64
-  from source. Release archives cover only x86-64 Linux, macOS and Windows.
-- **Size and retention.** Measured cost is about 1.2 KB resident and 7.7 µs of
-  reopen time per posit: 1M posits means 1.2 GiB RSS and an 8 s start.
+  scheduled maintenance window. Release archives include linux/arm64 since
+  0.3.2-beta.7.
+- **Size and retention.** Measured cost is about 1.2 KB resident and 10 µs of
+  reopen time per posit: 1M posits means 1.2 GiB RSS and a 10 s start.
   Positorium is append-only with no delete, so **rotate the live store at
   about 1M posits or monthly**, whichever comes first. Carry still-active
   sessions forward with `dump`/`import`; keys are literals, so they survive
-  identity remapping. Write turn anchors only at human-facing turns and
+  identity remapping, and the identity cache is rebuilt from them. Write turn anchors only at human-facing turns and
   epochs, which cuts posit volume several-fold. Run the proxy on its own host,
   not in a Spark's unified memory.
 - **Scaling.** One process handles thousands of concurrent SSE streams. If one
@@ -519,12 +539,15 @@ an extraction run brings the watermark to the epoch's turn, the proxy writes a
 manifest entry with the run posit as its `delivery`, plus one declaration per
 audit revision. Before that, checks honestly return `indeterminate`.
 
-**Cost.** One check takes 17 ms at 100k posits and 206 ms at 1M. Every report
-embeds the full store manifest: 0.8 MiB at 100k, 9.2 MiB at 1M. `record by`
-stores that report, and the 16 MiB frame limit is reached at about 1.8M posits.
-So: run audits at epoch changes, not continuously. Record (`record by`) only
-non-`satisfied` verdicts, or write a compact summary posit (verdict, findings,
-report digest) instead. Store rotation (§8.4) keeps reports small.
+**Cost.** One check takes about 2 ms at 1M posits. Reports carry the store's
+digest and count plus the posits the check read, about 8 KiB at any store
+size. `record by` adds about 7 KiB on disk, so every verdict is recorded.
+`with full manifest` lists every posit in the store (9 MiB at 1M) and is only
+for forensic exports. Run audits at epoch changes and on a schedule.
+
+The `where` clause above has several predicates, so the audit must anchor on
+the session-key literal. With `where ?s = $session and …` instead, the same
+check took 8.5 s at 100k posits (spike S21).
 
 **Session status** (paper §6.4), exposed as the `x-handover-status` response
 header, on the admin API and in metrics:
@@ -603,7 +626,7 @@ handover/
 
 Main dependencies: `tokio`, `axum`/`hyper`, `reqwest` (rustls), `serde_json`,
 `sha2`, `globset`, `regex`, `tracing`, `metrics`, and
-`positorium = { version = "=0.3.1-beta.6", default-features = false, features = ["persistence"] }`.
+`positorium = { version = "=0.3.2-beta.7", default-features = false, features = ["persistence"] }`.
 
 ## 15. Configuration sketch
 
@@ -700,7 +723,7 @@ Each phase ends with something runnable and an exit check.
 | Phase | Deliverable | Exit criteria |
 | --- | --- | --- |
 | 0 | Workspace, `handover-mock`, transparent Chat Completions proxy with SSE tee, Tier 1 compose with vllm-router | Byte-identical passthrough. Added p50 latency below 1 ms per chunk. Stickiness visible in mock logs |
-| 1 | **Positorium spike** ✅ (`spike/`, [FINDINGS](spike/FINDINGS.md)): semantics validated, sketches corrected, benchmarks to 1M posits. Rotation set at about 1M posits or monthly. *Remaining:* Linux/arm64 fsync, reopen and RSS; branch-inheritance queries; harness authority in audits | Done on macOS. Linux numbers come with the Phase 0 compose stack |
+| 1 | **Positorium spike** ✅ (`spike/`, [FINDINGS](spike/FINDINGS.md)): semantics validated, sketches corrected, benchmarks to 1M posits, re-verified on 0.3.2-beta.7 (one-commit extraction, compact audits). Rotation set at about 1M posits or monthly. *Remaining:* Linux/arm64 fsync, reopen and RSS; branch-inheritance queries; harness authority in audits | Done on macOS. Linux numbers come with the Phase 0 compose stack |
 | 2 | Sessions, digest chain, turn anchors, served-model tracking, trigger detection (§6) | Scenario tests classify continuation, compaction, branch and switch correctly. Restart rebuilds state |
 | 3 | Deterministic events, admin decision API, status policy, packet rendering, epochs with byte-stable re-injection | Golden packets. Upstream bytes are stable across a restart within an epoch |
 | 4 | Option B extractor with verification. Option A fallback. Optional Option C | Mock suite passes, including injection and misattribution cases. Tier 2: cache hit on extraction confirmed by `cached_tokens` |
@@ -725,15 +748,17 @@ Each phase ends with something runnable and an exit check.
 - **Positorium beta**: format and language may change across betas (exact
   version pin; `dump`/`import` for migration). Single owner process. No delete,
   so rotation is needed. Fsync per command.
-- **Query-shape sensitivity** (spike): the planner ignores literal selectivity.
-  An unanchored or authority-joined query can be 100–3000× slower than its
-  anchored form. Keep all Traqula in `handover-register`. Add a regression
-  benchmark that fails if any production query exceeds its budget at 1M
-  posits. The upstream fixes are listed in the spike's feedback section.
-- **Search-or-add hazards** (spike S7, S8): silent fan-out across sessions and
-  silent junk Things from partial patterns. Generate every write from typed
-  Rust builders that only emit self-anchored unary-key lookups, and test that
-  each write changes exactly the expected number of posits.
+- **Query-shape sensitivity** (spike S21): since 0.3.2-beta.7 the planner uses
+  literal selectivity, so key-anchored queries take 1–3 ms at 1M posits. An
+  identity anchor (`where ?s = $s` with other predicates, or `($s, session)`
+  next to a small global class) can still be 100–4000× slower. Keep all
+  Traqula in `handover-register`. Add a regression benchmark that fails if any
+  production query exceeds its budget at 1M posits.
+- **Search-or-add fan-out** (spike S7): a lookup that is not scoped to its
+  session binds every session's match. Start every mutating script with
+  `strict mutations;`, which rejects such a write. Pass existing Things as
+  identity parameters, generate every write from typed Rust builders, and test
+  that each write changes exactly the expected number of posits.
 - **Unplanned model substitution** by a model-choosing next hop can't be
   prevented, only detected. Enforcement covers the gap for machine-checkable
   items.
@@ -746,7 +771,7 @@ Each phase ends with something runnable and an exit check.
 
 - Rönnbäck, L. (2026). Bounds on user repair after context loss in AI handoffs.
   *Discover Informatics*. https://link.springer.com/article/10.1007/s44564-026-00035-w
-- Positorium 0.3.1-beta.6: https://github.com/Roenbaeck/positorium — see
+- Positorium 0.3.2-beta.7: https://github.com/Roenbaeck/positorium — see
   `docs/guides/RUST.md`, `docs/reference/TRAQULA.md` (assertions, `in effect`,
   saved constraints), `docs/design/CONSTRAINTS.md`, `docs/guides/OPERATIONS.md`.
 - vllm-router: https://github.com/vllm-project/router — `docs/load_balancing/README.md`,

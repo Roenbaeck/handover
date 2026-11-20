@@ -1,14 +1,17 @@
 # Phase 1 spike: Positorium as the register store
 
 Validates PLAN.md §8 and §11 against the published crate
-`positorium = "=0.3.1-beta.6"` (persistence feature, no defaults). Each finding
-links to the test or binary that demonstrates it.
+`positorium = "=0.3.2-beta.7"` (persistence feature, no defaults). The spike
+first ran on 0.3.1-beta.6. Its feedback became
+[Roenbaeck/positorium#6](https://github.com/Roenbaeck/positorium/issues/6),
+which 0.3.2-beta.7 addresses; both versions' numbers are kept below. Each
+finding links to the test or binary that demonstrates it.
 
 ```sh
-cargo test --offline                                  # 18 tests, ~0.1 s
-cargo run --release --bin bench -- <dir> 1700 200     # ~1M posits, ~2 min
+cargo test --offline                                  # 21 tests, ~0.1 s
+cargo run --release --bin bench -- <dir> 1700 200     # ~1M posits, ~3 min
 cargo run --release --bin bench -- --reopen <dir>     # reopen in a fresh process
-cargo run --release --bin probe -- <dir> [J]          # query variants (+ explain)
+cargo run --release --bin probe -- <dir> [P]          # query variants (+ explain of one)
 ```
 
 ## Verdict
@@ -22,22 +25,30 @@ design needs is there:
 - meta-assertions give the bitemporal "what could the proxy know at T" view;
 - saved constraints audit the handover duties with per-session readiness.
 
-Four of the plan's sketches had to change: how existing Things are referenced
-in writes, how reads and audits are anchored, how authority is joined, and how
-large audit reports get. Store size has to be bounded by rotation.
+Since 0.3.2-beta.7:
+
+- **an extraction is one command and one commit**, with existing Things passed
+  as identity parameters;
+- `strict mutations;` turns silent fan-out into an error;
+- audit reports are about 8 KiB whatever the store size, so `record by` is
+  cheap.
+
+Store size is still bounded by rotation, now only because of memory and reopen
+time. One planner gap remains (S21). Reads and audits anchored on a session-key
+literal take 1–3 ms at 1M posits, so the design does not depend on fixing it.
 
 ## Semantics (tests/)
 
 | # | Question | Answer | Test |
 | --- | --- | --- | --- |
 | S1 | Can all §8.1 role names be declared? | Yes, including `session`, `item`, `kind`, `action`, `decision` | `q1_writes::all_plan_roles_can_be_declared` |
-| S2 | `$parameters` in appearances (`($branch, branch)`)? | **No.** Appearances accept only `+x`/`x` in `add posit` and `?x` in `search`. Parameters work in value, time and `where` positions | `q1::appearance_parameters_are_rejected` |
-| S3 | How to reference an existing Thing? | Keyed get-or-create: `search [{(?s, session_key)}, $key, *] or add posit [{(+s, session_key)}, $key, $t];` promotes `s` into mutation scope for later commands | `q1::existing_things_are_referenced_by_get_or_create_on_a_key` |
-| S4 | Recall a posit binding in the same command? | **No** (`variable 'm' is not bound in a prior command`). Use `add posit +m [...] and assert +a by dev with 100% at $t, [...]` (one atomic batch), then a second command for the extractor's meta-assertion on `a` | `q1::posit_binding_is_not_recallable_within_one_command`, `q1::and_assert_plus_one_command_for_the_meta_assertion` |
-| S5 | Rebind an existing posit (e.g. to assert on it later)? | Re-add the identical proposition. It returns the canonical posit, creates nothing new and binds `+m` | `q1::readding_an_identical_proposition_binds_the_canonical_posit` |
+| S2 | `$parameters` in appearances (`($branch, branch)`)? | **Yes, since 0.3.2-beta.7**, in both `add posit` and `search`, for Thing and Posit parameters. A reference from another store is rejected on entry, and an unknown identity is rejected on write. (0.3.1-beta.6: parse error) | `q1::identity_parameters_work_in_appearances`, `q1::a_revocation_targets_the_membership_posit_by_parameter` |
+| S3 | How to reference an existing Thing? | Pass its cached identity as a parameter. On first sight (or after a restart), use a keyed get-or-create: `search [{(?s, session_key)}, $key, *] or add posit [{(+s, session_key)}, $key, $t];` promotes `s` into mutation scope | `q1::existing_things_are_referenced_by_get_or_create_on_a_key` |
+| S4 | Recall a posit binding in the same command? | **Yes, since 0.3.2-beta.7.** `+m` and `and assert +a` can be recalled by later additions in the same `add posit`, so target, assertion and meta-assertion share one commit. (0.3.1-beta.6: `not bound in a prior command`) | `q1::posit_bindings_are_recallable_within_one_command`, `q1::an_extraction_is_one_atomic_command_with_identity_parameters` |
+| S5 | Rebind an existing posit (e.g. to assert on it later)? | Pass it as a Posit parameter, `($m, posit)`, or re-add the identical proposition, which returns the canonical posit and creates nothing | `q1::readding_an_identical_proposition_binds_the_canonical_posit` |
 | S6 | Parameters for packet text, JSON scopes, decimals, µs times? | Round-trip exactly (multi-line text with quotes, braces and backslashes; JSON as JSON literal; `0.30`; `'2026-11-20 14:03:07.123456'`) | `q1::value_and_time_parameters_round_trip` |
-| S7 | **Hazard:** do lookups correlate with earlier bindings? | **No.** Query variables are lexical. `search [{(?t, turn), (?s, session)}, 5, *]` after a session lookup matches turn 5 of *every* session, and the next `add posit` fans out over all of them | `q1::search_or_add_does_not_correlate_with_earlier_bindings_and_fans_out` |
-| S8 | **Hazard:** partial appearance-set lookups | `{(?e, epoch)}` does not match a stored `{(e, epoch), (s, session)}`. The search misses and the fallback silently creates a junk Thing | found in `q3::c1_…` (see comment there) |
+| S7 | Do lookups correlate with earlier bindings? | **No**, query variables are lexical. `search [{(?t, turn), (?s, session)}, 5, *]` after a session lookup matches turn 5 of *every* session. By default the next `add posit` fans out; **with `strict mutations;` it is rejected** (`'t' holds 2 identities`). Scope the lookup with `($s, session)` | `q1::search_or_add_scopes_lexically_and_strict_mutations_rejects_the_fan_out` |
+| S8 | Closed vs. open appearance sets | `{(?e, epoch)}` matches only unary sets; `{(?e, epoch), ...}` also matches `{epoch, session}`. This was always documented; the spike's first round wrongly reported it as a hazard | `q1::closed_appearance_sets_match_exactly_and_open_sets_match_supersets` |
 | S9 | Does `as of` on assertion slots expose revocations? | Yes. The latest position per (target, source), including 0%, at any cut | `q2_reads::as_of_on_assertion_slots_keeps_latest_position_including_withdrawals` |
 | S10 | `in effect` vs. 0% and −100% | 0% removes the target from the effective set; −100% stays in effect. Use `as of` on the assertion slot to show revoked items | `q2::in_effect_drops_withdrawals_but_keeps_negative_positions` |
 | S11 | Rewording and equal-time conflicts | `as of` returns the latest wording; two equal-time statements both survive (disputed wording) | `q2::register_read_returns_latest_wording_and_equal_time_conflicts` |
@@ -45,8 +56,12 @@ large audit reports get. Store size has to be bounded by rotation.
 | S13 | `as of ?at` with `?at` bound by another pattern | Works, which is what the epoch audits need | `q2::as_of_accepts_a_variable_bound_by_another_pattern` |
 | S14 | Do the §11 audits validate as saved constraints? | Yes: C1 (active hard items cited), C2 (revoked items cited as revoked), C3 (no forwarded action matched an active hard item) | `q3_constraints::*` |
 | S15 | Verdicts without readiness | Any finding query using `as of`, `in effect`, `latest` or `not exists` reports `indeterminate` until a readiness declaration covers the check. All our audits use `as of`, so **readiness is required to ever see `violated` or `satisfied`** | `q3::c1_needs_readiness_to_turn_a_missing_citation_into_a_violation` |
-| S16 | Per-session readiness | Works. The declaration value must equal `{"ready": {"parameters": {"session_key": {"kind": "literal", "text": "\"sess-1\""}}, "clock": null}}`. It is tied to one constraint revision (roles `policy`, `manifest`, `delivery`, `previous` are fixed by the checker). Using it for another session fails | `q3::readiness_is_bound_to_the_session_parameter` |
+| S16 | Per-session readiness | Works. The declaration value must equal `{"ready": {"parameters": {"session_key": {"kind": "literal", "text": "\"sess-1\""}}, "clock": null}}` and is tied to one constraint revision (roles `policy`, `manifest`, `delivery`, `previous` are fixed by the checker). Using it for another session fails. Since 0.3.2-beta.7, run, manifest entry and declaration are one command with `($rev, policy)` | `q3::readiness_is_bound_to_the_session_parameter` |
 | S17 | `record by` | Stores the report as a posit about the revision, ascertained at 100% by the evaluator. Returns an `audit` column | `q3::record_by_saves_the_report_as_an_audit_posit` |
+| S18 | Report size | Report version 2 carries `snapshot.digest`, `snapshot.count` and `read_posits`; `with full manifest` adds the sorted `snapshot.posits` with the same digest | `q3::reports_carry_a_digest_by_default_and_the_full_manifest_on_request` |
+| S19 | Atomicity of one command | A command with a bad identity in its last addition commits nothing | `q1::an_extraction_is_one_atomic_command_with_identity_parameters` |
+| S20 | `and assert … by $dev`? | **No**, the source must be `+x` or `x`. Write the explicit `+a [{(m, posit), ($dev, ascertains)}, 100%, $t]` instead. It is the same posit `and assert` generates | grammar (`assertion_source`); used in `q1::an_extraction_is_one_…` |
+| S21 | **Planner gap:** which identity anchors steer the plan? | A key literal always does. `where ?s = $s` does **only as the sole predicate**: adding `and ?c > 0%` goes from 0.83 ms to 270 ms at 1M (`probe` Q vs. V). `($s, session)` in an appearance does not count toward the estimate: joined with the 50-row `authority` class it takes 220 ms at 1M (`probe` P) | `src/bin/probe.rs` N–X |
 
 ## Performance (src/bin/bench.rs)
 
@@ -55,93 +70,104 @@ The synthetic load is about 3 posits per turn, 200 turns per session (items,
 assertions, meta-assertions, actions, epochs with ~1 KB packets). Linux and
 arm64 numbers, especially fsync, still need measuring.
 
-| Measure | ~9k posits | ~100k posits | ~1M posits |
-| --- | ---: | ---: | ---: |
-| Single-posit `add posit` (one durable commit) p50 | 13.8 ms | 13.0 ms | 15.0 ms |
-| Extraction write (keyed lookups + item batch + meta; 2 commits) p50 | — | 28 ms | 32 ms |
-| Register read, **revised** (anchored on `session_key` literal, no authority join) p50 | — | 0.97 ms | 2.65 ms |
-| Register read, keyed but joining `{(?src, authority)}` p50 | 6 ms | 46 ms | 367 ms |
-| Register read, **PLAN sketch** (`where ?s = $session`) p50 | 123 ms | 7.7 s | skipped |
-| Audit check C1, **revised** p50 | 5 ms | 17 ms | 206 ms |
-| Audit check C1, PLAN sketch | 79 ms | 6.8 s | skipped |
-| Check report size | 63 KiB | 832 KiB | **9.2 MiB** |
-| Reads p50 while the writer commits (4 readers) | — | 0.84 ms | 2.85 ms |
-| Reopen (replay) in a fresh process | 28 ms | 0.42 s | **7.8 s** |
-| RSS after reopen | — | 135 MiB | **1.2 GiB** |
-| Store on disk | 0.3 MiB | 8.9 MiB | 89 MiB |
-| Bulk load rate (one script per session) | 3.3k posits/s | 14.7k posits/s | 14.2k posits/s |
+| Measure (p50) | ~9k posits | ~100k posits | ~1M posits | 0.3.1-beta.6 at ~1M |
+| --- | ---: | ---: | ---: | ---: |
+| Single-posit `add posit` (one durable commit) | 13.7 ms | 14.0 ms | 17.4 ms | 15.0 ms |
+| **Extraction write, 1 command with identity parameters** | 15.3 ms | 15.7 ms | **15.8 ms** | — |
+| Extraction write, old shape (3 keyed lookups + 2 commits) | 28.8 ms | 31.6 ms | 40.7 ms | 32 ms |
+| Register read anchored on `session_key` | 1.15 ms | 1.12 ms | 2.66 ms | 2.65 ms |
+| Same + `{(?src, authority)}` join | 1.02 ms | 1.09 ms | **2.40 ms** | 367 ms |
+| PLAN sketch read (`where ?s = $session` only) | 0.88 ms | 0.87 ms | **2.07 ms** | 7.7 s at 100k |
+| `($s, session)` in appearance + authority join | 3.06 ms | 20 ms | 244 ms | — |
+| Audit C1 anchored on `session_key` | 1.42 ms | 1.59 ms | **2.20 ms** | 206 ms |
+| Audit C1 with `($session, session)` | 1.74 ms | 16 ms | 356 ms | — |
+| Audit C1, PLAN sketch (`where ?s = $session and …`) | 362 ms | 8.5 s | skipped | 6.8 s at 100k |
+| Check report, default | 7.2 KiB | 8.4 KiB | **7.7 KiB** | 9.2 MiB |
+| Check report, `with full manifest` | 107 KiB | 840 KiB | 9.0 MiB | — |
+| Check + `record by` (disk per 10 audits) | 19 ms (+0.07 MiB) | 15 ms (+0.08 MiB) | 18 ms (+0.07 MiB) | +9 MiB per audit |
+| Reads while the writer commits (4 readers) | 1.02 ms | 0.81 ms | 0.96 ms | 2.85 ms |
+| Reopen (replay) in a fresh process | — | 0.56 s | 9.9 s | 7.8 s |
+| RSS after reopen | — | 142 MiB | 1.19 GiB | 1.2 GiB |
+| Store on disk | 1.1 MiB | 8.9 MiB | 89 MiB | 89 MiB |
+| Bulk load rate (one script per session) | 11.4k posits/s | 12.7k posits/s | 12.9k posits/s | 14.2k posits/s |
+
+The 1M p95 for the anchored read (47 ms) was disturbed by a compile running at
+the same time. The p50s and the 100k run are clean.
 
 What the numbers mean:
 
 1. **Writes are fsync-bound, not size-bound.** One durable command costs about
-   13–15 ms on this Mac at every store size. An extraction is 2 commands, so
-   about 30 ms, which caps a single writer at roughly 30 extractions/s here.
-   That is far above the expected load (one extraction per human-facing turn).
-   Group commit is only worth building if Linux numbers are much worse.
-2. **Anchor every query on a literal-valued unary key pattern.** The planner
-   orders patterns by structural candidate count and ignores literal-value
-   selectivity. `where ?s = $session` is applied after a store-wide scan
-   (8 s at 100k). Joining a small global class such as `{(?src, authority)}`
-   makes the plan start there and cross-join (`pattern_order [4,1,2,3]` in
-   `probe … J`). Starting from `[{(?s, session_key)}, $key, *]` and resolving
-   authority in Rust gives 1–3 ms.
+   14–17 ms on this Mac at every store size. An extraction is now one command,
+   so one writer handles about 60 extractions/s here, far above the expected
+   one per human-facing turn. Group commit is not needed unless Linux fsync is
+   much slower.
+2. **Anchor reads and audits on the key literal.**
+   `[{(?s, session_key)}, $session_key, *]` gives 1–3 ms at 1M with or without
+   an authority join, so authority can now be joined in the query. A
+   `where ?s = $s` anchor is as fast, but only while it is the sole predicate.
+   Audits always have more predicates, so they stay keyed. `($s, session)` is
+   the right form for *writes*, which are not planned. For reads it is fine
+   unless a small global class is joined (S21).
 3. **Authority in audits = session ownership.**
-   `[{(?s, session), (?src, developer)}, "owner", *]` is bound through `?s`,
-   so the plan stays anchored (`probe … L`: 0.69 ms vs. 31 ms).
-4. **Audit cost and report size grow with the whole store.** Every report
-   includes the store's full posit manifest. At 1M posits a check takes about
-   200 ms and returns 9.2 MiB. `record by` stores that report (+9 MiB on disk
-   per recorded audit). The 16 MiB storage-frame limit is reached at roughly
-   1.8M posits.
-5. **Memory and reopen time are about 1.2 KB and 7.7 µs per posit.** A 1M-posit
-   store needs about 1.2 GiB resident and 8 s to start. Keep the proxy off the
-   Sparks' unified memory, and bound the live store by rotation.
+   `[{(?s, session), (?src, developer)}, "owner", *]` keeps the plan anchored
+   through `?s` (`probe` U: 1.5 ms at 1M).
+4. **Audit reports are constant-size.** About 8 KiB at every store size, and
+   `record by` adds about 7 KiB on disk per audit. Every verdict can be
+   recorded. `with full manifest` (9 MiB at 1M) is for forensic exports only.
+5. **Memory and reopen time are about 1.2 KB and 10 µs per posit.** A 1M-posit
+   store needs about 1.2 GiB resident and 10 s to start. These now decide
+   rotation. Keep the proxy off the Sparks' unified memory.
 
 ## Design rules that follow
 
-- **R1. Every Thing a later script must reference gets a unique literal key**
-  in a class-specific unary role (`session_key`, `branch_key`, `item_key`,
-  `epoch_key`, positor `name`). Writes resolve it with a keyed get-or-create.
-- **R2. Every lookup is self-anchored by a literal in its own search** (S7).
-  Never rely on an earlier binding inside a `search … or add posit`.
-- **R3. Look up by the unary key slot, never by a partial appearance set** (S8).
+- **R1. Every Thing a later script must reference has a unique literal key** in
+  a class-specific unary role (`session_key`, `branch_key`, `item_key`,
+  `epoch_key`, positor `name`). The key anchors reads and audits, resolves
+  identities after a restart, and survives store rotation. The proxy caches the
+  identity in Rust and writes with identity parameters. Keyed get-or-create is
+  only for first sight.
+- **R2. Every mutating script starts with `strict mutations;`** (S7). A lookup
+  inside a script is scoped by an identity parameter or a literal in its own
+  search.
+- **R3. Use `{(?x, role), ...}` to match a superset** (S8). Closed sets match
+  exactly.
 - **R4. Do not make turns lookup targets.** Citations and actions carry the turn
   index in a JSON value. Turn anchors (index, digest) are write-only and read
   back only at restart.
-- **R5. Reads and audits start from `[{(?s, session_key)}, $session_key, *]`.**
-  Authority is resolved in Rust for reads, and through session ownership in
-  audits.
-- **R6. One extraction = 2 commands:** item facts + membership + `and assert`
-  (atomic), then the meta-assertion. A crash in between leaves an item with an
-  unconfirmed extraction, which derives as `uncertain`. Retries are idempotent
-  (S5).
+- **R5. Reads and audits start from `[{(?s, session_key)}, $session_key, *]`**
+  (S21). Authority can be joined in reads, and in audits it is resolved through
+  session ownership.
+- **R6. One extraction = one command:** every item of the delta, its developer
+  assertion, the extractor's meta-assertion and the branch watermark (S4,
+  S19). The watermark moves exactly when the items are stored, so a retry is
+  safe.
 - **R7. Keep each live store small:** rotate at about 1M posits or monthly,
-  whichever comes first. Write turn anchors only at human-facing turns and
-  epochs, not on every tool-loop request.
-- **R8. Run audits at epoch changes, not continuously.** Record (`record by`)
-  only non-`satisfied` verdicts, or write a compact summary posit instead
-  (verdict, findings, report digest).
+  whichever comes first, for memory and start-up time. Write turn anchors only
+  at human-facing turns and epochs, not on every tool-loop request.
+- **R8. Run audits at epoch changes and on a schedule, and record every
+  verdict** (`record by`, about 7 KiB each). Use `with full manifest` only for
+  exports.
 
 ## Feedback for Positorium
 
-These would simplify the proxy, and they are general enough to be worth
-considering upstream:
+Issue [#6](https://github.com/Roenbaeck/positorium/issues/6) listed six items.
+All of them are addressed in 0.3.2-beta.7 and verified here:
 
-1. **Identity parameters in appearances** (`($session, session)` in `add posit`
-   and `search`). They would remove the keyed lookups (R1–R3) and the fan-out
-   hazard (S7), and allow references to posits by reference
-   (`check constraint`/readiness writes currently need a search-or-add with a
-   sentinel fallback; see `declare_ready` in q3).
-2. **Planner: use literal-value selectivity**, and treat an identity-parameter
-   equality in `where` as an anchor. Both turn into seconds-long scans today
-   (finding 2).
-3. **Constraint reports: an option for a digest-only or read-scoped manifest.**
-   The full store manifest makes reports O(store), and `record by` hits the
-   16 MiB frame limit at about 1.8M posits (finding 4).
-4. **A warning when `search … or add posit` binds more than one row** in a
-   script that later mutates. This is S7's silent fan-out.
-5. Optional: allow recalling a posit binding later in the same `add posit`
-   command (S4). That would make extraction one atomic command.
+| # | Item | Status |
+| --- | --- | --- |
+| 1 | Planner literal selectivity and identity anchors | Fixed for key literals and a lone `where ?s = $s`. Residual gaps in S21 |
+| 2 | Report embeds full manifest | Fixed: report v2, `with full manifest` on request (S18) |
+| 3 | Identity parameters in appearances | Fixed (S2); `and assert by $x` still not accepted (S20) |
+| 4 | Silent search-or-add fan-out | Fixed: `strict mutations;` (S7). The partial-set part was a misreading (S8) |
+| 5 | Same-command posit recall | Fixed (S4) |
+| 6 | Docs (`in effect`), linux/arm64 build | Fixed upstream; not exercised here |
+
+Remaining, worth a follow-up:
+
+1. **Planner:** treat a `?x = $identity` conjunct as an anchor even when the
+   `where` clause has other predicates. Use the identity's posting size as the
+   estimate for an appearance-position identity parameter (S21).
+2. Minor: accept an identity parameter as the `and assert … by` source (S20).
 
 ## Still open after the spike
 
@@ -151,4 +177,5 @@ considering upstream:
 - Harness-sourced authority in audits (project rules from system prompts).
   Likely a second `union` branch, `[{(?s, session), (?src, instructed_by)}, "harness", *]`.
 - Store rotation mechanics: dump and import of still-active sessions, and
-  identity remapping of keys (keys are literals, so they survive remapping).
+  identity remapping of keys (keys are literals, so they survive remapping;
+  cached identities must be re-resolved).

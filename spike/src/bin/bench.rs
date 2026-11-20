@@ -65,6 +65,41 @@ const READ_REVISED: &str = r#"
     return ?ikey, ?kind, ?strength, ?text, ?src, ?c, ?asserted;
 "#;
 
+/// 0.3.2-beta.7: the session Thing goes straight into the appearance, authority joined.
+const READ_PARAM: &str = r#"
+    search ?m = [{(?i, item), ($s, session)}, "registered", ?introduced],
+           [{(?i, item_key)}, ?ikey, *],
+           [{(?i, kind)}, ?kind, *] as of $t,
+           [{(?i, strength)}, ?strength, *] as of $t,
+           [{(?i, statement)}, ?text, *] as of $t,
+           ?a = [{(?m, posit), (?src, ascertains)}, ?c, ?asserted] as of $t,
+           [{(?src, authority)}, ?authority, *]
+    return ?ikey, ?kind, ?strength, ?text, ?authority, ?c, ?asserted;
+"#;
+
+/// 0.3.2-beta.7: C1 anchored on the session Thing parameter, authority = owner.
+const C1_PARAM: &str = r#"add constraint "C1 identity parameter" {
+    search ?ep = [{(?e, epoch), ($session, session)}, *, ?at],
+           ?m = [{(?i, item), ($session, session)}, "registered", ?introduced],
+           [{(?i, strength)}, "hard", *] as of ?at,
+           [{(?m, posit), (?src, ascertains)}, ?c, *] as of ?at,
+           [{($session, session), (?src, developer)}, "owner", *]
+    not exists { [{(?e, packet_of), (?i, packet_item)}, *, *] }
+    where ?introduced < ?at and ?c > 0%
+    return ?e, ?i, ?ep, ?m;
+};"#;
+
+/// PLAN.md §8.3 extraction: one command, existing Things as identity parameters.
+const EXTRACTION_ONE: &str = r#"
+    add posit +m [{(+i, item), ($s, session)}, "registered", $at],
+              [{(i, item_key)}, $key, $at], [{(i, kind)}, "prohibition", $at],
+              [{(i, strength)}, "hard", $at], [{(i, statement)}, $text, $at],
+              [{(i, cited_turn)}, $cite, $at],
+              +a [{(m, posit), ($dev, ascertains)}, 100%, $at],
+              [{(a, posit), ($ext, ascertains)}, 85%, @NOW],
+              [{($s, extracted_through)}, $through, @NOW];
+"#;
+
 fn ts(session: usize, turn: usize) -> String {
     // One turn per 7 seconds, sessions offset by an hour; sub-second precision.
     let secs = 36_000 + session * 3_600 + turn * 7;
@@ -255,10 +290,43 @@ fn main() {
         )
         .unwrap();
     });
-    println!("extraction write (2 commits):          {}", pct(typical));
+    println!("extraction write, old (3 lookups + 2 commits): {}", pct(typical));
+
+    let lookup = |script: &str, key: String| {
+        let set = db
+            .execute_one_with_options(script, ExecutionOptions::default().bind("key", key))
+            .unwrap();
+        thing(&db, &set.cell(0, "x").unwrap().text)
+    };
+    let ext = lookup(r#"search [{(?x, name)}, $key, *] return ?x;"#, "extractor:qwen".into());
+    let ctx: Vec<(ExecutionParameter, ExecutionParameter)> = (0..100)
+        .map(|n| {
+            let s = (n * 7919) % sessions;
+            (
+                lookup(r#"search [{(?x, session_key)}, $key, *] return ?x;"#, format!("sess-{s}")),
+                lookup(r#"search [{(?x, name)}, $key, *] return ?x;"#, format!("developer:{}", s % 50)),
+            )
+        })
+        .collect();
+    let one = timed(100, |n| {
+        db.execute_with_options(
+            EXTRACTION_ONE,
+            ExecutionOptions::default()
+                .bind("s", ctx[n].0.clone())
+                .bind("dev", ctx[n].1.clone())
+                .bind("ext", ext.clone())
+                .bind("at", time(&format!("2031-01-01 00:{:02}:{:02}.{:06}", n / 60, n % 60, n)))
+                .bind("key", format!("bench1#{n}"))
+                .bind("text", "Do not run database migrations")
+                .bind("cite", ExecutionParameter::Literal { text: r#"{"turn":5,"quote":"no migrations from here"}"#.into() })
+                .bind("through", n as i64),
+        )
+        .unwrap();
+    });
+    println!("extraction write, 1 command + identity params: {}", pct(one));
 
     let sample: Vec<usize> = (0..50).map(|n| (n * 7919) % sessions).collect();
-    let unanchored_ok = posits <= 200_000;
+    let unanchored_ok = std::env::var("SKIP_PLAN_SKETCH").is_err();
 
     let read_revised = timed(sample.len(), |n| {
         db.execute_one_with_options(
@@ -280,7 +348,7 @@ fn main() {
 
     let things: Vec<ExecutionParameter> = sample
         .iter()
-        .take(5)
+        .take(10)
         .map(|s| {
             let set = db
                 .execute_one_with_options(
@@ -292,7 +360,7 @@ fn main() {
         })
         .collect();
     if unanchored_ok {
-        let read_plan = timed(3, |n| {
+        let read_plan = timed(10, |n| {
             db.execute_one_with_options(
                 READ_PLAN,
                 ExecutionOptions::default().bind("t", time("2040-01-01")).bind("session", things[n].clone()),
@@ -301,6 +369,14 @@ fn main() {
         });
         println!("register read, PLAN sketch:            {}", pct(read_plan));
     }
+    let read_param = timed(10, |n| {
+        db.execute_one_with_options(
+            READ_PARAM,
+            ExecutionOptions::default().bind("t", time("2040-01-01")).bind("s", things[n].clone()),
+        )
+        .unwrap();
+    });
+    println!("register read, ($s, session) + authority: {}", pct(read_param));
 
     let rev = db.execute_one(C1_REVISED).unwrap().reference(0, "revision").unwrap();
     let mut lat = Vec::new();
@@ -321,7 +397,8 @@ fn main() {
         last.2,
         last.0
     );
-    if unanchored_ok {
+    // The C1 sketch grows roughly quadratically with the store (8.5 s at 100k); skip it at 1M.
+    if unanchored_ok && posits <= 200_000 {
         let rev = db.execute_one(C1_PLAN).unwrap().reference(0, "revision").unwrap();
         let (d, verdict, bytes, work) = check_summary(
             &db,
@@ -330,6 +407,34 @@ fn main() {
         );
         println!("check C1 PLAN sketch:                  {d:.2?}  report {:.1} KiB  work {work}  verdict {verdict}", bytes as f64 / 1024.0);
     }
+    let rev_param = db.execute_one(C1_PARAM).unwrap().reference(0, "revision").unwrap();
+    let lat: Vec<Duration> = things
+        .iter()
+        .map(|t| {
+            check_summary(&db, "check constraint $rev;", ExecutionOptions::default().bind("rev", rev_param.clone()).bind("session", t.clone())).0
+        })
+        .collect();
+    println!("check C1 ($session, session):          {}", pct(lat));
+    let (d, _, bytes, _) = check_summary(
+        &db,
+        "check constraint $rev with full manifest;",
+        ExecutionOptions::default().bind("rev", rev.clone()).bind("session_key", format!("sess-{}", sample[0])),
+    );
+    println!("check C1 revised, with full manifest:  {d:.2?}  report {:.1} KiB", bytes as f64 / 1024.0);
+    let disk_before = dir_mib(&dir);
+    let recorded = timed(10, |n| {
+        db.execute_with_options(
+            r#"search [{(?x, name)}, "handover", *] or add posit [{(+x, name)}, "handover", @NOW];
+               check constraint $rev record by x;"#,
+            ExecutionOptions::default().bind("rev", rev.clone()).bind("session_key", format!("sess-{}", sample[n])),
+        )
+        .unwrap();
+    });
+    println!(
+        "check C1 revised + record by:          {}  disk +{:.2} MiB for 10 audits",
+        pct(recorded),
+        dir_mib(&dir) - disk_before
+    );
 
     // Concurrent revised reads while the writer appends.
     let db = std::sync::Arc::new(db);

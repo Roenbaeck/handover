@@ -5,11 +5,12 @@
 //! - Which verdicts come back without and with a readiness declaration?
 //! - Can readiness be scoped per session (parameterized declaration)?
 //! - Does `record by` store the report as an audit posit?
+//! - Are reports compact (digest + count) unless the full manifest is requested?
 //!
-//! The bodies use the shapes the Q4 benchmark recommends: anchored on the
-//! `session_key` literal, with the session owner as the authoritative positor
-//! (an identity filter in `where`, or a join on a global `authority` posit,
-//! makes the planner scan the whole store).
+//! The bodies use the shape the Q4 benchmark recommends: anchored on the
+//! `session_key` literal, with the session owner as the authoritative positor.
+//! (In 0.3.2-beta.7 a `where ?s = $session` anchor is lost once the clause has
+//! other conjuncts, and `($s, session)` in an appearance does not steer the plan.)
 //!
 //! Scenario: session sess-1. Hard permission P granted 10:00, revoked 10:30.
 //! Hard prohibition H from 10:50. Epoch E1 at 10:15 (P active), E2 at 12:00 (P revoked, H active).
@@ -112,21 +113,18 @@ fn scope_for(session_key: &str) -> String {
 }
 
 /// Record an extraction run as the delivery, link it from a manifest entry, and
-/// declare the revision ready for this session. Returns the declaration reference.
-///
-/// The revision is recalled into mutation scope with a search-or-add whose search
-/// is filtered by the identity parameter. Appearances cannot take `$parameters`.
+/// declare the revision ready for this session, all in one command. Returns the
+/// declaration reference. The revision goes straight into the appearance as `($rev, policy)`.
 fn declare_ready(db: &Database, revision: &ExecutionParameter, session_key: &str) -> ExecutionParameter {
     let sets = db
         .execute_with_options(
             r#"
+            strict mutations;
             search [{(?s, session_key)}, $session_key, *] or add posit [{(+s, session_key)}, $session_key, @NOW];
-            search ?rev = [{(?policy, source)}, *, *] where ?rev = $rev
-                or add posit +rev [{(+never, name)}, "unreachable", @NOW];
-            add posit +run [{(+r, extraction), (s, session)}, {"through": 41}, @NOW];
-            add posit +entry [{(run, delivery)}, "included", @NOW];
-            add posit +ready [{(rev, policy), (entry, manifest)}, $scope, @NOW];
-            search ?ready = [{(?rev, policy), (?entry, manifest)}, *, *] where ?rev = $rev return ?ready;
+            add posit +run [{(+r, extraction), (s, session)}, {"through": 41}, @NOW],
+                      +entry [{(run, delivery)}, "included", @NOW],
+                      [{($rev, policy), (entry, manifest)}, $scope, @NOW];
+            search ?ready = [{($rev, policy), (?entry, manifest)}, *, *] return ?ready;
             "#,
             ExecutionOptions::default()
                 .bind("rev", revision.clone())
@@ -170,11 +168,11 @@ fn c1_needs_readiness_to_turn_a_missing_citation_into_a_violation() {
     assert_eq!(verdict, "violated");
     assert_eq!(findings[0].1, "violated");
 
-    // The proxy fixes E1 by citing P. The lookup must match the stored appearance
-    // set exactly ({epoch, session}); `{(?e, epoch)}` alone would miss and the
-    // fallback would silently create a junk epoch.
+    // The proxy fixes E1 by citing P. `{(?e, epoch)}` would match only unary sets;
+    // the open set `{(?e, epoch), ...}` matches the stored {epoch, session}.
     db.execute(
-        r#"search [{(?e, epoch), (?s, session)}, *, '2026-11-20 10:15:00'] or add posit [{(+e, epoch)}, "x", @NOW];
+        r#"strict mutations;
+           search [{(?e, epoch), ...}, *, '2026-11-20 10:15:00'] or add posit [{(+e, epoch)}, "x", @NOW];
            search [{(?p, item_key)}, "P", *] or add posit [{(+p, item_key)}, "P", @NOW];
            add posit [{(e, packet_of), (p, packet_item)}, "hard-active", '2026-11-20 10:15:00'];"#,
     )
@@ -254,4 +252,28 @@ fn record_by_saves_the_report_as_an_audit_posit() {
         .unwrap();
     assert_eq!(stored.rows.len(), 1, "the audit report is ascertained by the evaluator");
     assert_eq!(stored.rows[0][1].text, "100%");
+}
+
+#[test]
+fn reports_carry_a_digest_by_default_and_the_full_manifest_on_request() {
+    let db = scenario();
+    let rev = save_constraint(&db, C1_CITES_ACTIVE);
+    let ready = declare_ready(&db, &rev, "sess-1");
+    let compact = report(&check(&db, &rev, "sess-1", Some(&ready)));
+    println!("compact snapshot: {}", compact["snapshot"]);
+    assert!(compact["snapshot"]["digest"].is_string() || compact["snapshot"]["digest"].is_number());
+    assert!(compact["snapshot"]["count"].as_u64().unwrap() > 0);
+    assert!(compact["snapshot"].get("posits").is_none(), "no manifest by default");
+    assert!(!compact["read_posits"].as_array().unwrap().is_empty());
+
+    let full = db
+        .execute_one_with_options(
+            "check constraint $rev with readiness $ready with full manifest;",
+            ExecutionOptions::default().bind("rev", rev).bind("session_key", "sess-1").bind("ready", ready),
+        )
+        .unwrap();
+    let full = report(&full);
+    let posits = full["snapshot"]["posits"].as_array().unwrap();
+    assert_eq!(posits.len() as u64, full["snapshot"]["count"].as_u64().unwrap());
+    assert_eq!(full["snapshot"]["digest"], compact["snapshot"]["digest"]);
 }
