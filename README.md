@@ -6,7 +6,8 @@ Ensure proper LLM handovers using a constraint register.
 SGLang gateway, LiteLLM, a bare vLLM, a cloud endpoint). It keeps the permissions,
 prohibitions, commitments and goals a developer set during a coding session alive
 when the answering model changes, as described in
-Rönnbäck (2026), *Bounds on user repair after context loss in AI handoffs*. The only
+Rönnbäck (2026), [*Bounds on user repair after context loss in AI handoffs*](https://doi.org/10.1007/s44564-026-00035-w)
+(open access). The only
 durable store is [Positorium](https://github.com/Roenbaeck/positorium).
 
 What it does:
@@ -216,3 +217,24 @@ including subagents, compaction and a model switch. Not yet done:
 Dual-licensed under [Apache 2.0](LICENSE.Apache-2.0) or [MIT](LICENSE.MIT), at your option.
 
 SPDX-License-Identifier: Apache-2.0 OR MIT
+
+## Citation
+
+If you use handover in your research, please cite the paper it implements:
+
+> Rönnbäck, L. (2026). Bounds on user repair after context loss in AI handoffs.
+> *Discover Informatics*, 1, 32. https://doi.org/10.1007/s44564-026-00035-w
+
+```bibtex
+@article{ronnback2026bounds,
+  author  = {R{\"o}nnb{\"a}ck, Lars},
+  title   = {Bounds on user repair after context loss in {AI} handoffs},
+  journal = {Discover Informatics},
+  volume  = {1},
+  number  = {1},
+  pages   = {32},
+  year    = {2026},
+  doi     = {10.1007/s44564-026-00035-w},
+  url     = {https://doi.org/10.1007/s44564-026-00035-w}
+}
+```

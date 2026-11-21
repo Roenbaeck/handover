@@ -1,0 +1,37 @@
+cff-version: 1.2.0
+message: "If you use this software in your research, please cite the paper it implements."
+title: handover
+abstract: >-
+  A proxy in front of any OpenAI-compatible endpoint that keeps the permissions,
+  prohibitions, commitments and goals of a coding session alive when the
+  answering model changes.
+type: software
+authors:
+  - family-names: Rönnbäck
+    given-names: Lars
+    orcid: "https://orcid.org/0000-0002-8810-7587"
+repository-code: "https://github.com/Roenbaeck/handover"
+license:
+  - MIT
+  - Apache-2.0
+keywords:
+  - LLM
+  - coding agents
+  - handoff
+  - context loss
+  - constraint register
+preferred-citation:
+  type: article
+  title: "Bounds on user repair after context loss in AI handoffs"
+  authors:
+    - family-names: Rönnbäck
+      given-names: Lars
+      orcid: "https://orcid.org/0000-0002-8810-7587"
+  journal: Discover Informatics
+  volume: 1
+  issue: 1
+  start: 32
+  year: 2026
+  month: 10
+  doi: 10.1007/s44564-026-00035-w
+  url: "https://doi.org/10.1007/s44564-026-00035-w"
