@@ -1,0 +1,24 @@
+# Tier 1 dev stack (deploy/dev.yml): proxy → vllm-router → three mock workers.
+default_profile = "generic"
+# The dev stack has no developer tokens and listens on 0.0.0.0 inside compose.
+allow_anonymous = true
+
+[listen]
+addr = "0.0.0.0:8443"
+
+[store]
+path = "/var/lib/handover/register.store"
+
+[[upstream]]
+name = "router"
+base_url = "http://router:8000"
+affinity = { kind = "header", name = "X-Session-ID" }
+models = ["qwen3-coder@2026-11", "qwen3-coder-next@2026-12"]
+
+[extractor]
+mode = "same_route"
+debounce_ms = 300
+max_concurrent = 3
+
+[policy]
+packet_strategy = "status_aware_core"

@@ -1,0 +1,62 @@
+# handover configuration (PLAN.md §15). Every key shown with its default
+# unless marked "example".
+
+# Harness profile when a request sends no `X-Handover-Harness` header:
+# generic | claude-code | codex | opencode, or a name from [profiles].
+default_profile = "generic"
+session_idle_secs = 21600      # evict idle sessions from memory (rebuilt from the store)
+models_poll_secs = 60          # poll /v1/models for new weights under the same name; 0 = off
+max_body_bytes = 67108864      # largest request body (whole sessions are resent every turn)
+# operator_token_sha256 = "…"  # enables POST /admin/traqula (read-only queries over all sessions)
+allow_anonymous = false        # with no [[developer]] entries, refuse to listen beyond loopback
+# admin_token_sha256 = "…"     # anonymous mode only: token for explicit decisions (views stay open)
+
+[listen]
+addr = "0.0.0.0:8443"
+
+[store]
+# Positorium store directory. Omit for an in-memory store (tests only).
+path = "/var/lib/handover/register.store"            # example
+
+# The next hop: anything that speaks OpenAI Chat Completions + SSE (§12).
+[[upstream]]
+name = "fleet"                                        # example
+base_url = "http://vllm-router:8000"                  # example
+# header (default, sends the session key) | prefix (identical bytes only) | none
+affinity = { kind = "header", name = "X-Session-ID" }
+models = ["qwen3-coder@2026-11"]                      # example, informational
+# api_key = "…"            # bearer for the next hop
+# forward_client_auth = false   # forward the client's Authorization when api_key is unset (Tier 3 only)
+# served_model_header = "x-served-model"   # if the next hop names the served model in a header
+
+[extractor]
+enabled = true
+mode = "same_route"            # Option B on the hot prefix; "dedicated" = Option C (needs url/model)
+# url = "http://small-model:8000"
+# model = "qwen3-1.7b"
+# api_key = "…"
+debounce_ms = 1500
+max_concurrent = 4             # about one per Spark
+deadline_ms_on_handover = 4000 # Option A
+min_meta_certainty = 0.7       # below → uncertain (enforced as hold)
+max_tokens = 1024
+# priority = 10                # vLLM request priority for background extraction
+
+[policy]
+enforce_kinds = ["prohibition", "role_boundary"]
+on_uncertain_hard = "hold"     # hold | block | warn
+packet_strategy = "status_aware_core"   # surface_rich | chronological | none (evaluation)
+packet_max_chars = 8000
+record_audits = true
+drop_revoked_tools = false     # at an epoch change, remove tools an active hard item forbids outright
+
+# Bearer tokens → developer labels (hex SHA-256 of the token). With no entries,
+# every request is "developer:anonymous" (development only).
+# [[developer]]
+# token_sha256 = "5e88…"         # the harness's inference token
+# admin_token_sha256 = "9f86…"   # a separate token for the admin API; never give it to the harness
+# label = "developer:42"
+
+# Extra harness profiles.
+# [profiles]
+# my-harness = "/etc/handover/profiles/my-harness.toml"

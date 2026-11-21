@@ -1,0 +1,27 @@
+# Codex CLI (Responses with store=false, or Chat Completions).
+name = "codex"
+session_header = "X-Session-ID"
+harness_tags = ["environment_context", "user_instructions", "turn_aborted"]
+denial_patterns = ['(?i)exec command rejected by user', '(?i)patch rejected by user', '(?i)aborted by user']
+plan_tools = ["update_plan"]
+
+[[tools]]
+name = "shell"
+op = "exec"
+command = "command"
+paths = ["workdir"]
+
+[[tools]]
+name = "local_shell"
+op = "exec"
+command = "action.command"
+
+[[tools]]
+name = "apply_patch"
+op = "write"
+parser = "apply_patch"
+patch_field = "input"
+
+[[tools]]
+name = "web_search"
+op = "network"

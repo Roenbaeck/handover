@@ -1,0 +1,14 @@
+# A tentative instruction becomes an uncertain hard item: the action is held
+# with one targeted question instead of being blocked or silently allowed.
+name = "uncertain"
+description = "Low-confidence prohibition holds the matching action"
+
+[[step]]
+model = "model-a"
+user = "Maybe avoid running the load tests today? Not sure yet."
+extract = [{ op = "add", kind = "prohibition", strength = "hard", statement = "Do not run the load tests", enforce = { ops = ["exec"], commands = ["loadtest"] }, quote = "Maybe avoid running the load tests today?", confidence = 0.4 }]
+
+[[step]]
+model = "model-b"
+user = "Check performance."
+tool = { name = "Bash", arguments = { command = "make loadtest" }, expect = "held" }

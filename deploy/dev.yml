@@ -1,0 +1,63 @@
+# Tier 1 (PLAN.md §16): the proxy in front of a real vllm-router and three
+# handover-mock workers. `docker compose -f deploy/dev.yml up --build`
+#
+#   curl -s localhost:8443/v1/chat/completions -H 'X-Session-ID: demo' \
+#     -H 'content-type: application/json' \
+#     -d '{"model":"qwen3-coder@2026-11","stream":true,"messages":[{"role":"user","content":"Do not push to main.\n#mock:text OK."}]}'
+#   curl -s localhost:8443/v1/sessions/demo | jq
+#   curl -s localhost:9001/_mock/log   # (expose a mock port to inspect stickiness)
+#
+# The router is built from github.com/vllm-project/router (docker/Dockerfile.router)
+# unless VLLM_ROUTER_IMAGE names an image; pin it by digest for the air gap.
+name: handover-dev
+
+x-mock: &mock
+  image: handover:dev
+  entrypoint: ["handover-mock"]
+
+services:
+  mock-1:
+    <<: *mock
+    command: ["--listen", "0.0.0.0:9001", "--worker", "w1", "--model", "qwen3-coder@2026-11", "--model", "qwen3-coder-next@2026-12"]
+    ports: ["9001:9001"]
+  mock-2:
+    <<: *mock
+    command: ["--listen", "0.0.0.0:9001", "--worker", "w2", "--model", "qwen3-coder@2026-11", "--model", "qwen3-coder-next@2026-12"]
+  mock-3:
+    <<: *mock
+    command: ["--listen", "0.0.0.0:9001", "--worker", "w3", "--model", "qwen3-coder@2026-11", "--model", "qwen3-coder-next@2026-12"]
+
+  router:
+    # Built from the router's own Dockerfile unless VLLM_ROUTER_IMAGE names a
+    # pinned image (do that for the air gap; see deploy/bundle.sh).
+    image: ${VLLM_ROUTER_IMAGE:-handover/vllm-router:dev}
+    build:
+      context: https://github.com/vllm-project/router.git
+      dockerfile: docker/Dockerfile.router
+    # The image has no ENTRYPOINT, so the command names the binary.
+    command:
+      - vllm-router
+      - --host=0.0.0.0
+      - --port=8000
+      - --policy=consistent_hash
+      - --worker-urls
+      - http://mock-1:9001
+      - http://mock-2:9001
+      - http://mock-3:9001
+    depends_on: [mock-1, mock-2, mock-3]
+
+  proxy:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: handover:dev
+    volumes:
+      - ./dev.toml:/etc/handover/handover.toml:ro
+      - register:/var/lib/handover
+    environment:
+      RUST_LOG: info,handover_proxy=debug
+    ports: ["8443:8443"]
+    depends_on: [router]
+
+volumes:
+  register:

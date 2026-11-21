@@ -1,0 +1,20 @@
+[package]
+name = "handover-register"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The constraint register on Positorium: schema, typed writes, reads, saved-constraint audits, writer thread"
+
+[dependencies]
+handover-core.workspace = true
+positorium.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

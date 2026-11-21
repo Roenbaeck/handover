@@ -1,0 +1,36 @@
+# OpenCode (Chat Completions).
+name = "opencode"
+session_header = "X-Session-ID"
+harness_tags = ["system-reminder"]
+denial_patterns = ['(?i)the user (has )?rejected', '(?i)permission denied']
+plan_tools = ["todowrite"]
+
+[[tools]]
+name = "bash"
+op = "exec"
+command = "command"
+
+[[tools]]
+name = "edit"
+op = "write"
+paths = ["filePath"]
+
+[[tools]]
+name = "write"
+op = "write"
+paths = ["filePath"]
+
+[[tools]]
+name = "patch"
+op = "write"
+paths = ["filePath"]
+
+[[tools]]
+name = "read"
+op = "read"
+paths = ["filePath"]
+
+[[tools]]
+name = "webfetch"
+op = "network"
+urls = ["url"]

@@ -1,0 +1,80 @@
+# Claude Code (Anthropic Messages, or Chat Completions through a gateway).
+# Tool results arrive inside user messages; reminders and command wrappers are injected text.
+name = "claude-code"
+session_header = "X-Session-ID"
+# Everything Claude Code puts into user-role messages that the developer did not type,
+# including shell output and background-task notifications (which can carry the
+# model's own words).
+harness_tags = [
+  "system-reminder", "command-name", "command-message", "command-args", "command-contents",
+  "local-command-stdout", "local-command-stderr", "local-command-caveat", "user-prompt-submit-hook",
+  "bash-input", "bash-stdout", "bash-stderr", "task-notification",
+]
+# Third-party sections appended to the system prompt are not project rules.
+injected_system_patterns = ['(?m)^# MCP Server Instructions']
+harness_patterns = [
+  # The summary Claude Code writes when it compacts its own history.
+  '(?s)\AThis session is being continued from a previous conversation.*\z',
+]
+# Lanes. Subagents send their own system prompt, whose first line marks them.
+delegated_system_patterns = ['cc_is_subagent=true']
+# The first line carries a per-conversation suffix (`cc_version=2.1.330.992`).
+system_identity_ignore = ['(?m)^x-anthropic-billing-header:.*$']
+compaction_summary_patterns = ['\AThis session is being continued from a previous conversation']
+# Compaction: the full history plus this instruction, answered with a summary.
+side_request_patterns = ['Your task is to create a detailed summary of the conversation so far']
+denial_patterns = [
+  "(?i)the user doesn't want to proceed with this tool use",
+  '(?i)user rejected (this|the) tool',
+  '(?i)permission to use \S+ has been denied',
+]
+plan_tools = ["TodoWrite"]
+
+[[tools]]
+name = "Bash"
+op = "exec"
+command = "command"
+
+[[tools]]
+name = "Edit"
+op = "write"
+paths = ["file_path"]
+
+[[tools]]
+name = "MultiEdit"
+op = "write"
+paths = ["file_path"]
+
+[[tools]]
+name = "Write"
+op = "write"
+paths = ["file_path"]
+
+[[tools]]
+name = "NotebookEdit"
+op = "write"
+paths = ["notebook_path"]
+
+[[tools]]
+name = "Read"
+op = "read"
+paths = ["file_path"]
+
+[[tools]]
+name = "Glob"
+op = "read"
+paths = ["path"]
+
+[[tools]]
+name = "Grep"
+op = "read"
+paths = ["path"]
+
+[[tools]]
+name = "WebFetch"
+op = "network"
+urls = ["url"]
+
+[[tools]]
+name = "WebSearch"
+op = "network"

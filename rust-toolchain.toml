@@ -1,0 +1,5 @@
+[toolchain]
+# Positorium builds on stable; the Docker image pins the same release (deploy/Dockerfile).
+channel = "stable"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

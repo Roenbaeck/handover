@@ -1,0 +1,25 @@
+# A commitment is replaced; the successor must not resume the old plan.
+name = "supersede"
+description = "Superseded commitment and an active goal across a model switch"
+
+[[step]]
+model = "model-a"
+user = "Rewrite the retry logic as a queue."
+extract = [{ op = "add", kind = "commitment", strength = "graded", statement = "Rewrite retry logic as a queue", confidence = 0.9 }]
+
+[[step]]
+model = "model-a"
+user = "Change of plan: fix the duplicate retries within the existing retry module instead. Do not add new dependencies."
+extract = [
+  { op = "supersede", replaces = "C1", kind = "commitment", strength = "graded", statement = "Fix duplicate retries within the existing retry module", quote = "fix the duplicate retries within the existing retry module instead", confidence = 0.9 },
+  { op = "add", kind = "prohibition", strength = "hard", statement = "Do not add new dependencies", enforce = { ops = ["exec"], commands = ["(pip|npm|cargo) (install|add)"] }, quote = "Do not add new dependencies.", confidence = 0.9 },
+]
+
+[[step]]
+model = "model-b"
+user = "Carry on."
+tool = { name = "Bash", arguments = { command = "pip install tenacity" }, expect = "blocked" }
+
+[expect]
+hard_active = ["Do not add new dependencies"]
+ended = ["Rewrite retry logic as a queue"]

@@ -1,0 +1,6 @@
+# Fallback profile: no tool rules (argument names are guessed), common injected blocks.
+name = "generic"
+session_header = "X-Session-ID"
+harness_tags = ["system-reminder", "environment_context", "user_instructions"]
+denial_patterns = ['(?i)permission denied by (the )?user', '(?i)user (rejected|denied) (this|the) (tool|command)']
+plan_tools = ["update_plan", "TodoWrite", "todowrite"]
