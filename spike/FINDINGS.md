@@ -1,11 +1,13 @@
 # Phase 1 spike: Positorium as the register store
 
 Validates PLAN.md §8 and §11 against the published crate
-`positorium = "=0.3.2-beta.7"` (persistence feature, no defaults). The spike
+`positorium = "=0.3.3-beta.8"` (persistence feature, no defaults). The spike
 first ran on 0.3.1-beta.6. Its feedback became
-[Roenbaeck/positorium#6](https://github.com/Roenbaeck/positorium/issues/6),
-which 0.3.2-beta.7 addresses; both versions' numbers are kept below. Each
-finding links to the test or binary that demonstrates it.
+[Roenbaeck/positorium#6](https://github.com/Roenbaeck/positorium/issues/6)
+(addressed in 0.3.2-beta.7) and
+[#8](https://github.com/Roenbaeck/positorium/issues/8) (addressed in
+0.3.3-beta.8). Numbers for each version are kept below. Each finding links to
+the test or binary that demonstrates it.
 
 ```sh
 cargo test --offline                                  # 21 tests, ~0.1 s
@@ -33,9 +35,10 @@ Since 0.3.2-beta.7:
 - audit reports are about 8 KiB whatever the store size, so `record by` is
   cheap.
 
-Store size is still bounded by rotation, now only because of memory and reopen
-time. One planner gap remains (S21). Reads and audits anchored on a session-key
-literal take 1–3 ms at 1M posits, so the design does not depend on fixing it.
+Since 0.3.3-beta.8 every query shape the design uses is sub-millisecond at 1M
+posits, whether it is anchored on a key literal, an identity parameter in an
+appearance, or `where ?s = $s` among other predicates (S21). Store size is
+still bounded by rotation, only because of memory and reopen time.
 
 ## Semantics (tests/)
 
@@ -60,8 +63,8 @@ literal take 1–3 ms at 1M posits, so the design does not depend on fixing it.
 | S17 | `record by` | Stores the report as a posit about the revision, ascertained at 100% by the evaluator. Returns an `audit` column | `q3::record_by_saves_the_report_as_an_audit_posit` |
 | S18 | Report size | Report version 2 carries `snapshot.digest`, `snapshot.count` and `read_posits`; `with full manifest` adds the sorted `snapshot.posits` with the same digest | `q3::reports_carry_a_digest_by_default_and_the_full_manifest_on_request` |
 | S19 | Atomicity of one command | A command with a bad identity in its last addition commits nothing | `q1::an_extraction_is_one_atomic_command_with_identity_parameters` |
-| S20 | `and assert … by $dev`? | **No**, the source must be `+x` or `x`. Write the explicit `+a [{(m, posit), ($dev, ascertains)}, 100%, $t]` instead. It is the same posit `and assert` generates | grammar (`assertion_source`); used in `q1::an_extraction_is_one_…` |
-| S21 | **Planner gap:** which identity anchors steer the plan? | A key literal always does. `where ?s = $s` does **only as the sole predicate**: adding `and ?c > 0%` goes from 0.83 ms to 270 ms at 1M (`probe` Q vs. V). `($s, session)` in an appearance does not count toward the estimate: joined with the 50-row `authority` class it takes 220 ms at 1M (`probe` P) | `src/bin/probe.rs` N–X |
+| S20 | `and assert … by $dev`? | **Yes, since 0.3.3-beta.8.** (0.3.2-beta.7: the source had to be `+x` or `x`; the explicit `+a [{(m, posit), ($dev, ascertains)}, 100%, $t]` is the same posit and still works) | grammar (`assertion_source`); used in `q1::an_extraction_is_one_…` |
+| S21 | Which identity anchors steer the plan? | **All of them, since 0.3.3-beta.8**: a key literal, `($s, session)` in an appearance, and `where ?s = $s` among other predicates. At 1M posits `probe` P, Q, V and R take 0.17–0.40 ms. (0.3.2-beta.7: `where ?s = $s` steered only as the sole predicate, 270 ms with one more conjunct; `($s, session)` next to `authority` took 220 ms; the five-pattern audit 7.8 s at 100k) | `src/bin/probe.rs` N–X |
 
 ## Performance (src/bin/bench.rs)
 
@@ -93,6 +96,24 @@ arm64 numbers, especially fsync, still need measuring.
 
 The 1M p95 for the anchored read (47 ms) was disturbed by a compile running at
 the same time. The p50s and the 100k run are clean.
+
+### Re-run on 0.3.3-beta.8 (same machine and fixture, p50)
+
+| Measure | ~100k posits | ~1M posits | 0.3.2-beta.7 at ~1M |
+| --- | ---: | ---: | ---: |
+| Extraction write, 1 command | 15.5 ms | 17.2 ms | 15.8 ms |
+| Register read anchored on `session_key` | 0.86 ms | 0.84 ms | 2.66 ms |
+| Same + `{(?src, authority)}` join | 0.83 ms | 0.91 ms | 2.40 ms |
+| `($s, session)` in appearance + authority join | 0.69 ms | 0.83 ms | 244 ms |
+| `where ?s = $s and ?c > 0%` (`probe` V) | 0.19 ms | 0.19 ms | 270 ms |
+| Audit C1 anchored on `session_key` | 0.51 ms | 0.63 ms | 2.20 ms |
+| Audit C1 with `($session, session)` | 0.64 ms | 0.62 ms | 356 ms |
+| Audit C1, PLAN sketch (`where ?s = $session and …`) | 0.81 ms | 0.40 ms (`probe` R) | 8.5 s at 100k |
+| Check report, default | 5.4 KiB | 5.7 KiB | 7.7 KiB |
+| Reads while the writer commits (4 readers) | 0.70 ms | 0.72 ms | 0.96 ms |
+
+Writes are unchanged (fsync-bound). Every read and audit shape is now below
+1 ms at 1M posits, independent of how it is anchored.
 
 What the numbers mean:
 
@@ -134,9 +155,10 @@ What the numbers mean:
 - **R4. Do not make turns lookup targets.** Citations and actions carry the turn
   index in a JSON value. Turn anchors (index, digest) are write-only and read
   back only at restart.
-- **R5. Reads and audits start from `[{(?s, session_key)}, $session_key, *]`**
-  (S21). Authority can be joined in reads, and in audits it is resolved through
-  session ownership.
+- **R5. Reads and audits start from a key literal** such as
+  `[{(?b, branch_key)}, $branch_key, *]`. Since 0.3.3-beta.8 identity anchors are
+  as fast (S21), so this is now a convention for readable, rotation-proof
+  scripts rather than a performance requirement.
 - **R6. One extraction = one command:** every item of the delta, its developer
   assertion, the extractor's meta-assertion and the branch watermark (S4,
   S19). The watermark moves exactly when the items are stored, so a retry is
@@ -162,12 +184,9 @@ All of them are addressed in 0.3.2-beta.7 and verified here:
 | 5 | Same-command posit recall | Fixed (S4) |
 | 6 | Docs (`in effect`), linux/arm64 build | Fixed upstream; not exercised here |
 
-Remaining, worth a follow-up:
-
-1. **Planner:** treat a `?x = $identity` conjunct as an anchor even when the
-   `where` clause has other predicates. Use the identity's posting size as the
-   estimate for an appearance-position identity parameter (S21).
-2. Minor: accept an identity parameter as the `and assert … by` source (S20).
+Issue [#8](https://github.com/Roenbaeck/positorium/issues/8) reported the
+remaining planner gaps (S21) and `and assert … by $param` (S20). Both are fixed
+in 0.3.3-beta.8 and verified above. Nothing is outstanding.
 
 ## Still open after the spike
 

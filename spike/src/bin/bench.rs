@@ -397,8 +397,8 @@ fn main() {
         last.2,
         last.0
     );
-    // The C1 sketch grows roughly quadratically with the store (8.5 s at 100k); skip it at 1M.
-    if unanchored_ok && posits <= 200_000 {
+    // Before 0.3.3-beta.8 the C1 sketch grew roughly quadratically (8.5 s at 100k).
+    if unanchored_ok {
         let rev = db.execute_one(C1_PLAN).unwrap().reference(0, "revision").unwrap();
         let (d, verdict, bytes, work) = check_summary(
             &db,

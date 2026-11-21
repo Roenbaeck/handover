@@ -233,8 +233,8 @@ fn main() {
     let explain_only: Option<String> = std::env::args().nth(2);
     let large = db.execute_one("search ?p = [*, *, *] return ?p;").unwrap().rows.len() > 200_000;
     for (label, script) in VARIANTS {
-        if large && label.starts_with('R') {
-            println!("{label:<52} skipped (about 8 s at 100k posits, grows faster than linearly)");
+        if large && label.starts_with('R') && std::env::var("PROBE_ALL").is_err() {
+            println!("{label:<52} skipped (8 s at 100k posits before 0.3.3-beta.8; set PROBE_ALL=1)");
             continue;
         }
         let mut lat: Vec<Duration> = Vec::new();
