@@ -210,3 +210,9 @@ including subagents, compaction and a model switch. Not yet done:
 - Tier 2 (real small models), the rest of Tier 3 (interactive Claude Code, Codex,
   OpenCode) and on-Spark validation;
 - Linux fsync and memory numbers.
+
+## License
+
+Dual-licensed under [Apache 2.0](LICENSE.Apache-2.0) or [MIT](LICENSE.MIT), at your option.
+
+SPDX-License-Identifier: Apache-2.0 OR MIT
